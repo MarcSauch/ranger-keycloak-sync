@@ -14,7 +14,9 @@ Sync Keycloak realm roles to Apache Ranger roles and keep role membership aligne
 
 - Python 3.10+
 - Network access to both Keycloak Admin API and Ranger Admin API
-- A Keycloak client with `client_credentials` enabled
+- A Keycloak client configured for one of these OAuth grant types:
+	- `client_credentials` (service account)
+	- `password` (resource owner username/password)
 
 ## Configuration
 
@@ -25,13 +27,22 @@ Required values:
 - `KEYCLOAK_BASE_URL`
 - `KEYCLOAK_REALM`
 - `KEYCLOAK_CLIENT_ID`
-- `KEYCLOAK_CLIENT_SECRET`
 - `RANGER_USERNAME`
 - `RANGER_PASSWORD`
 - `RANGER_SERVICE_NAME`
 
+Authentication-specific required values:
+
+- For `KEYCLOAK_GRANT_TYPE=client_credentials`:
+	- `KEYCLOAK_CLIENT_SECRET`
+- For `KEYCLOAK_GRANT_TYPE=password`:
+	- `KEYCLOAK_USERNAME`
+	- `KEYCLOAK_PASSWORD`
+
 Common optional values:
 
+- `KEYCLOAK_GRANT_TYPE` (default: `client_credentials`)
+- `KEYCLOAK_TOKEN_SCOPE` (optional)
 - `SYNC_INTERVAL_SECONDS` (default: `86400`)
 - `SYNC_ONCE` (default: `false`)
 - `SYNC_REMOVE_MISSING_USERS` (default: `true`)

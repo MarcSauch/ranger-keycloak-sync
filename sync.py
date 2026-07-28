@@ -37,33 +37,72 @@ class KeycloakClient:
         self.base_url = env_required("KEYCLOAK_BASE_URL").rstrip("/")
         self.realm = env_required("KEYCLOAK_REALM")
         self.client_id = env_required("KEYCLOAK_CLIENT_ID")
-        self.client_secret = env_required("KEYCLOAK_CLIENT_SECRET")
+        self.client_secret = os.getenv("KEYCLOAK_CLIENT_SECRET", "")
+        self.grant_type = os.getenv("KEYCLOAK_GRANT_TYPE", "client_credentials").strip().lower()
+        self.user_name = os.getenv("KEYCLOAK_USERNAME", "").strip()
+        self.user_password = os.getenv("KEYCLOAK_PASSWORD", "")
+        self.scope = os.getenv("KEYCLOAK_TOKEN_SCOPE", "").strip()
         self.verify_tls = env_bool("KEYCLOAK_VERIFY_TLS", True)
+
+        if self.grant_type not in {"client_credentials", "password"}:
+            raise ValueError("KEYCLOAK_GRANT_TYPE must be either 'client_credentials' or 'password'")
+
+        if self.grant_type == "password":
+            if not self.user_name:
+                raise ValueError("Missing required environment variable for password grant: KEYCLOAK_USERNAME")
+            if not self.user_password:
+                raise ValueError("Missing required environment variable for password grant: KEYCLOAK_PASSWORD")
+        elif not self.client_secret:
+            raise ValueError("Missing required environment variable for client_credentials grant: KEYCLOAK_CLIENT_SECRET")
 
         self._token = ""
         self._token_expiry = 0.0
         self._session = requests.Session()
+
+    def _token_url(self) -> str:
+        return f"{self.base_url}/realms/{self.realm}/protocol/openid-connect/token"
+
+    def _token_request(self, data: Dict[str, str]) -> dict:
+        payload = {
+            "client_id": self.client_id,
+            **data,
+        }
+        if self.client_secret:
+            payload["client_secret"] = self.client_secret
+        if self.scope:
+            payload["scope"] = self.scope
+
+        resp = self._session.post(
+            self._token_url(),
+            data=payload,
+            timeout=30,
+            verify=self.verify_tls,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def login_user_and_get_access_token(self, username: str, password: str) -> dict:
+        return self._token_request(
+            {
+                "grant_type": "password",
+                "username": username,
+                "password": password,
+            }
+        )
 
     def _access_token(self) -> str:
         now = time.time()
         if self._token and now < self._token_expiry - 30:
             return self._token
 
-        token_url = (
-            f"{self.base_url}/realms/{self.realm}/protocol/openid-connect/token"
-        )
-        resp = self._session.post(
-            token_url,
-            data={
-                "grant_type": "client_credentials",
-                "client_id": self.client_id,
-                "client_secret": self.client_secret,
-            },
-            timeout=30,
-            verify=self.verify_tls,
-        )
-        resp.raise_for_status()
-        payload = resp.json()
+        if self.grant_type == "password":
+            payload = self.login_user_and_get_access_token(
+                self.user_name,
+                self.user_password,
+            )
+        else:
+            payload = self._token_request({"grant_type": "client_credentials"})
+
         self._token = payload["access_token"]
         self._token_expiry = now + int(payload.get("expires_in", 60))
         return self._token
