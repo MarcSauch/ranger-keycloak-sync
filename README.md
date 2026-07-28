@@ -43,12 +43,20 @@ Common optional values:
 
 - `KEYCLOAK_GRANT_TYPE` (default: `client_credentials`)
 - `KEYCLOAK_TOKEN_SCOPE` (optional)
+- `RANGER_NORMALIZE_USERNAMES` (default: `true`)
+- `RANGER_USERNAME_SEPARATOR` (default: `_`)
 - `SYNC_INTERVAL_SECONDS` (default: `86400`)
 - `SYNC_ONCE` (default: `false`)
 - `SYNC_REMOVE_MISSING_USERS` (default: `true`)
 - `KEYCLOAK_ROLE_EXCLUDE` (comma-separated list)
 - `RANGER_ROLE_PREFIX` (default: `kc_`)
 - `LOG_LEVEL` (default: `INFO`)
+
+Username normalization notes:
+
+- By default, usernames from Keycloak are normalized before Ranger API calls.
+- Spaces and unsupported characters are replaced with `RANGER_USERNAME_SEPARATOR`.
+- Example: `test user` becomes `test_user`.
 
 ## Run Locally
 

@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 import time
 from collections import defaultdict
 from typing import Dict, List, Set
@@ -157,6 +158,8 @@ class RangerSync:
         self.password = env_required("RANGER_PASSWORD")
         self.service_name = env_required("RANGER_SERVICE_NAME")
         self.role_prefix = os.getenv("RANGER_ROLE_PREFIX", "kc_")
+        self.normalize_usernames = env_bool("RANGER_NORMALIZE_USERNAMES", True)
+        self.username_separator = os.getenv("RANGER_USERNAME_SEPARATOR", "_")
         self.remove_missing_users = env_bool("SYNC_REMOVE_MISSING_USERS", True)
 
         self.exclude_roles = {
@@ -171,6 +174,25 @@ class RangerSync:
 
         self._client = RangerClient(self.base_url, (self.username, self.password))
 
+    def ranger_user_name(self, keycloak_user_name: str) -> str:
+        user_name = keycloak_user_name.strip()
+        if self.normalize_usernames:
+            # Ranger commonly rejects spaces and special chars in user names.
+            user_name = re.sub(r"\s+", self.username_separator, user_name)
+            user_name = re.sub(r"[^A-Za-z0-9._-]", self.username_separator, user_name)
+            user_name = re.sub(re.escape(self.username_separator) + r"+", self.username_separator, user_name)
+            user_name = user_name.strip(self.username_separator)
+
+        if not user_name:
+            raise ValueError(
+                f"Cannot map Keycloak username '{keycloak_user_name}' to a valid Ranger username"
+            )
+
+        if user_name != keycloak_user_name:
+            LOG.info("Mapped Keycloak username '%s' to Ranger username '%s'", keycloak_user_name, user_name)
+
+        return user_name
+
     def ensure_user_exists(self, user_name: str) -> None:
         get_url = f"{self.base_url}/service/xusers/users/userName/{quote(user_name, safe='')}"
         resp = self._session.get(get_url, timeout=30)
@@ -178,7 +200,7 @@ class RangerSync:
         if resp.status_code == 200:
             return
 
-        if resp.status_code != 404:
+        if resp.status_code not in (400, 404):
             resp.raise_for_status()
 
         create_url = f"{self.base_url}/service/xusers/users/external"
@@ -298,9 +320,11 @@ class SyncRunner:
             if not username or not user_id:
                 continue
 
+            ranger_username = self.ranger.ranger_user_name(username)
+
             roles = self.keycloak.user_realm_roles(user_id)
             for role in roles:
-                role_to_users[role].add(username)
+                role_to_users[role].add(ranger_username)
 
         LOG.info("Collected %d realm roles from Keycloak", len(role_to_users))
         return role_to_users
