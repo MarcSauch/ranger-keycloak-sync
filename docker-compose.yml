@@ -1,0 +1,12 @@
+version: "3.9"
+
+services:
+  ranger-keycloak-sync:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ranger-keycloak-sync
+    env_file:
+      - .env
+    restart: unless-stopped
+    command: ["python", "sync.py"]
