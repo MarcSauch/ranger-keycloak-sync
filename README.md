@@ -53,6 +53,9 @@ Common optional values:
 - `SYNC_INTERVAL_SECONDS` (default: `86400`)
 - `SYNC_ONCE` (default: `false`)
 - `SYNC_REMOVE_MISSING_USERS` (default: `true`)
+- `SYNC_INCLUDE_USERS` (comma-separated Keycloak usernames to sync)
+- `SYNC_INCLUDE_ROLES` (comma-separated Keycloak realm roles to sync)
+- `SYNC_INCLUDE_GROUPS` (comma-separated Keycloak groups to sync)
 - `KEYCLOAK_ROLE_EXCLUDE` (comma-separated list)
 - `RANGER_ROLE_PREFIX` (default: `kc_`)
 - `LOG_LEVEL` (default: `INFO`)
@@ -69,6 +72,14 @@ Group normalization notes:
 - `/` and unsupported characters are replaced with `RANGER_GROUP_SEPARATOR`.
 - Optional `RANGER_GROUP_PREFIX` can be used to namespace synced groups.
 - Example: `/team/data-engineering` becomes `team_data-engineering` with default separator.
+
+Subset sync notes:
+
+- By default, all Keycloak users/roles/groups are considered for sync.
+- Set `SYNC_INCLUDE_USERS` to limit sync to specific Keycloak usernames.
+- Set `SYNC_INCLUDE_ROLES` to limit synced role mappings.
+- Set `SYNC_INCLUDE_GROUPS` to limit synced group memberships.
+- You can combine all three filters to sync only a precise scope.
 
 ## Run Locally
 

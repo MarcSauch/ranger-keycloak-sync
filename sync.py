@@ -33,6 +33,11 @@ def env_required(name: str) -> str:
     return value
 
 
+def env_csv_set(name: str) -> Set[str]:
+    raw = os.getenv(name, "")
+    return {item.strip() for item in raw.split(",") if item.strip()}
+
+
 class KeycloakClient:
     def __init__(self) -> None:
         self.base_url = env_required("KEYCLOAK_BASE_URL").rstrip("/")
@@ -465,6 +470,16 @@ class SyncRunner:
         self.ranger = RangerSync()
         self.interval_seconds = int(os.getenv("SYNC_INTERVAL_SECONDS", "86400"))
         self.sync_once = env_bool("SYNC_ONCE", False)
+        self.include_users = env_csv_set("SYNC_INCLUDE_USERS")
+        self.include_roles = env_csv_set("SYNC_INCLUDE_ROLES")
+        self.include_groups = env_csv_set("SYNC_INCLUDE_GROUPS")
+
+        if self.include_users:
+            LOG.info("User subset filter enabled with %d users", len(self.include_users))
+        if self.include_roles:
+            LOG.info("Role subset filter enabled with %d roles", len(self.include_roles))
+        if self.include_groups:
+            LOG.info("Group subset filter enabled with %d groups", len(self.include_groups))
 
     def _build_mapping(self) -> tuple[Dict[str, Set[str]], Dict[str, Set[str]]]:
         role_to_users: Dict[str, Set[str]] = defaultdict(set)
@@ -478,15 +493,21 @@ class SyncRunner:
             user_id = user.get("id")
             if not username or not user_id:
                 continue
+            if self.include_users and username not in self.include_users:
+                continue
 
             ranger_username = self.ranger.ranger_user_name(username)
 
             roles = self.keycloak.user_realm_roles(user_id)
             for role in roles:
+                if self.include_roles and role not in self.include_roles:
+                    continue
                 role_to_users[role].add(ranger_username)
 
             groups = self.keycloak.user_groups(user_id)
             for group in groups:
+                if self.include_groups and group not in self.include_groups:
+                    continue
                 ranger_group = self.ranger.ranger_group_name(group)
                 group_to_users[ranger_group].add(ranger_username)
 
