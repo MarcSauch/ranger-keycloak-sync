@@ -150,6 +150,27 @@ class KeycloakClient:
         resp.raise_for_status()
         return {role.get("name") for role in resp.json() if role.get("name")}
 
+    def user_groups(self, user_id: str) -> Set[str]:
+        url = (
+            f"{self.base_url}/admin/realms/{self.realm}/users/"
+            f"{quote(user_id, safe='')}/groups"
+        )
+        resp = self._session.get(
+            url,
+            headers=self._headers(),
+            timeout=30,
+            verify=self.verify_tls,
+        )
+        resp.raise_for_status()
+
+        groups: Set[str] = set()
+        for group in resp.json():
+            # Prefer full Keycloak group path to avoid leaf-name collisions.
+            group_name = (group.get("path") or group.get("name") or "").strip()
+            if group_name:
+                groups.add(group_name)
+        return groups
+
 
 class RangerSync:
     def __init__(self) -> None:
@@ -158,8 +179,11 @@ class RangerSync:
         self.password = env_required("RANGER_PASSWORD")
         self.service_name = env_required("RANGER_SERVICE_NAME")
         self.role_prefix = os.getenv("RANGER_ROLE_PREFIX", "kc_")
+        self.group_prefix = os.getenv("RANGER_GROUP_PREFIX", "")
         self.normalize_usernames = env_bool("RANGER_NORMALIZE_USERNAMES", True)
         self.username_separator = os.getenv("RANGER_USERNAME_SEPARATOR", "_")
+        self.normalize_group_names = env_bool("RANGER_NORMALIZE_GROUP_NAMES", True)
+        self.group_separator = os.getenv("RANGER_GROUP_SEPARATOR", "_")
         self.remove_missing_users = env_bool("SYNC_REMOVE_MISSING_USERS", True)
 
         self.exclude_roles = {
@@ -212,6 +236,130 @@ class RangerSync:
             return
 
         create_resp.raise_for_status()
+
+    def ranger_group_name(self, keycloak_group_name: str) -> str:
+        group_name = f"{self.group_prefix}{keycloak_group_name.strip()}"
+        if self.normalize_group_names:
+            # Keep group names Ranger-safe while preserving identity-like text.
+            group_name = re.sub(r"\s+", self.group_separator, group_name)
+            group_name = re.sub(r"[^A-Za-z0-9._/-]", self.group_separator, group_name)
+            group_name = group_name.replace("/", self.group_separator)
+            group_name = re.sub(re.escape(self.group_separator) + r"+", self.group_separator, group_name)
+            group_name = group_name.strip(self.group_separator)
+
+        if not group_name:
+            raise ValueError(
+                f"Cannot map Keycloak group '{keycloak_group_name}' to a valid Ranger group"
+            )
+
+        if group_name != keycloak_group_name:
+            LOG.info("Mapped Keycloak group '%s' to Ranger group '%s'", keycloak_group_name, group_name)
+
+        return group_name
+
+    def ensure_group_exists(self, group_name: str) -> None:
+        get_urls = [
+            f"{self.base_url}/service/xusers/groups/groupName/{quote(group_name, safe='')}",
+            f"{self.base_url}/service/xusers/groups/name/{quote(group_name, safe='')}",
+        ]
+        for get_url in get_urls:
+            resp = self._session.get(get_url, timeout=30)
+            if resp.status_code == 200:
+                return
+            if resp.status_code not in (400, 404):
+                resp.raise_for_status()
+
+        create_payload = {"name": group_name}
+        create_urls = [
+            f"{self.base_url}/service/xusers/groups/external",
+            f"{self.base_url}/service/xusers/groups",
+        ]
+        for create_url in create_urls:
+            create_resp = self._session.post(create_url, json=create_payload, timeout=30)
+            if create_resp.status_code in (200, 201, 409):
+                LOG.info("Created Ranger group: %s", group_name)
+                return
+            if create_resp.status_code not in (400, 404, 405):
+                create_resp.raise_for_status()
+
+        raise RuntimeError(f"Unable to create Ranger group '{group_name}' via available endpoints")
+
+    @staticmethod
+    def _extract_group_names(user_info: dict) -> Set[str]:
+        groups: Set[str] = set()
+
+        for name in user_info.get("groupNameList") or []:
+            if isinstance(name, str) and name.strip():
+                groups.add(name.strip())
+
+        for entry in user_info.get("groups") or []:
+            if isinstance(entry, str) and entry.strip():
+                groups.add(entry.strip())
+            elif isinstance(entry, dict):
+                name = (entry.get("name") or "").strip()
+                if name:
+                    groups.add(name)
+
+        for entry in user_info.get("userGroups") or []:
+            if isinstance(entry, str) and entry.strip():
+                groups.add(entry.strip())
+            elif isinstance(entry, dict):
+                name = (entry.get("name") or entry.get("groupName") or "").strip()
+                if name:
+                    groups.add(name)
+
+        return groups
+
+    def _get_ranger_user_info(self, user_name: str) -> dict:
+        get_url = f"{self.base_url}/service/xusers/users/userName/{quote(user_name, safe='')}"
+        resp = self._session.get(get_url, timeout=30)
+        resp.raise_for_status()
+        return resp.json()
+
+    def _update_user_groups(self, user_name: str, target_groups: Set[str]) -> None:
+        payload = {
+            "name": user_name,
+            "groupNameList": sorted(target_groups),
+        }
+        update_urls = [
+            f"{self.base_url}/service/xusers/users/userinfo",
+            f"{self.base_url}/service/xusers/users/external",
+        ]
+
+        last_error: Exception | None = None
+        for update_url in update_urls:
+            try:
+                resp = self._session.post(update_url, json=payload, timeout=30)
+                if resp.status_code in (200, 201):
+                    return
+                if resp.status_code in (400, 404, 405):
+                    continue
+                resp.raise_for_status()
+            except Exception as exc:
+                last_error = exc
+
+        if last_error:
+            raise last_error
+        raise RuntimeError(f"Unable to update groups for Ranger user '{user_name}'")
+
+    def sync_user_groups(self, user_name: str, desired_groups: Set[str]) -> None:
+        if not desired_groups:
+            return
+
+        for group_name in sorted(desired_groups):
+            self.ensure_group_exists(group_name)
+
+        user_info = self._get_ranger_user_info(user_name)
+        current_groups = self._extract_group_names(user_info)
+        target_groups = current_groups | desired_groups
+
+        if target_groups == current_groups:
+            LOG.info("User %s already has all desired group memberships", user_name)
+            return
+
+        self._update_user_groups(user_name, target_groups)
+        added = sorted(target_groups - current_groups)
+        LOG.info("Added user %s to Ranger groups: %s", user_name, ", ".join(added))
 
     def _role_name(self, keycloak_role: str) -> str:
         return f"{self.role_prefix}{keycloak_role}"
@@ -287,15 +435,25 @@ class RangerSync:
         if not to_add and not to_remove:
             LOG.info("Role %s already in sync", role_name)
 
-    def sync(self, keycloak_data: Dict[str, Set[str]]) -> None:
+    def sync(self, role_data: Dict[str, Set[str]], group_data: Dict[str, Set[str]]) -> None:
         all_users = set()
-        for users in keycloak_data.values():
+        for users in role_data.values():
+            all_users.update(users)
+        for users in group_data.values():
             all_users.update(users)
 
         for user in sorted(all_users):
             self.ensure_user_exists(user)
 
-        for kc_role, users in sorted(keycloak_data.items()):
+        for user in sorted(all_users):
+            desired_groups = {
+                group_name
+                for group_name, group_users in group_data.items()
+                if user in group_users
+            }
+            self.sync_user_groups(user, desired_groups)
+
+        for kc_role, users in sorted(role_data.items()):
             if kc_role in self.exclude_roles:
                 continue
             self.sync_role_members(self._role_name(kc_role), users)
@@ -308,8 +466,9 @@ class SyncRunner:
         self.interval_seconds = int(os.getenv("SYNC_INTERVAL_SECONDS", "86400"))
         self.sync_once = env_bool("SYNC_ONCE", False)
 
-    def _build_mapping(self) -> Dict[str, Set[str]]:
+    def _build_mapping(self) -> tuple[Dict[str, Set[str]], Dict[str, Set[str]]]:
         role_to_users: Dict[str, Set[str]] = defaultdict(set)
+        group_to_users: Dict[str, Set[str]] = defaultdict(set)
 
         users = self.keycloak.list_users()
         LOG.info("Fetched %d users from Keycloak", len(users))
@@ -326,14 +485,20 @@ class SyncRunner:
             for role in roles:
                 role_to_users[role].add(ranger_username)
 
+            groups = self.keycloak.user_groups(user_id)
+            for group in groups:
+                ranger_group = self.ranger.ranger_group_name(group)
+                group_to_users[ranger_group].add(ranger_username)
+
         LOG.info("Collected %d realm roles from Keycloak", len(role_to_users))
-        return role_to_users
+        LOG.info("Collected %d groups from Keycloak", len(group_to_users))
+        return role_to_users, group_to_users
 
     def run_forever(self) -> None:
         while True:
             try:
-                mapping = self._build_mapping()
-                self.ranger.sync(mapping)
+                role_mapping, group_mapping = self._build_mapping()
+                self.ranger.sync(role_mapping, group_mapping)
                 LOG.info("Sync completed")
             except Exception as exc:
                 LOG.exception("Sync failed: %s", exc)
