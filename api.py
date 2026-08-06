@@ -2,7 +2,9 @@ import importlib
 import os
 import threading
 import time
-from typing import Any, Dict, List, Set
+from typing import Dict, List, Set
+
+from pydantic import BaseModel, Field
 
 from sync_logic import LOG, SyncRunner
 
@@ -12,20 +14,32 @@ FastAPI = fastapi_mod.FastAPI
 HTTPException = fastapi_mod.HTTPException
 
 
-def _normalize_str_list(value: Any, field_name: str) -> Set[str] | None:
-    if value is None:
-        return None
-    if not isinstance(value, list):
-        raise HTTPException(status_code=400, detail=f"{field_name} must be a JSON array of strings")
+class SyncRequest(BaseModel):
+    include_users: List[str] | None = Field(default=None)
+    include_roles: List[str] | None = Field(default=None)
+    include_groups: List[str] | None = Field(default=None)
+    merge_with_env_filters: bool = Field(default=True)
 
-    normalized: Set[str] = set()
-    for item in value:
-        if not isinstance(item, str):
-            raise HTTPException(status_code=400, detail=f"{field_name} must contain only strings")
-        item = item.strip()
-        if item:
-            normalized.add(item)
-    return normalized
+    @staticmethod
+    def _normalize_str_list(value: List[str] | None) -> Set[str] | None:
+        if value is None:
+            return None
+
+        normalized: Set[str] = set()
+        for item in value:
+            trimmed = item.strip()
+            if trimmed:
+                normalized.add(trimmed)
+        return normalized
+
+    def include_users_set(self) -> Set[str] | None:
+        return self._normalize_str_list(self.include_users)
+
+    def include_roles_set(self) -> Set[str] | None:
+        return self._normalize_str_list(self.include_roles)
+
+    def include_groups_set(self) -> Set[str] | None:
+        return self._normalize_str_list(self.include_groups)
 
 
 class SyncApi:
@@ -33,25 +47,17 @@ class SyncApi:
         self.runner = SyncRunner()
         self._lock = threading.Lock()
 
-    def trigger(self, payload: Dict[str, Any]) -> Dict[str, object]:
+    def trigger(self, payload: SyncRequest) -> Dict[str, object]:
         if not self._lock.acquire(blocking=False):
             raise HTTPException(status_code=409, detail="A sync is already in progress")
 
         started = time.time()
         try:
-            include_users = _normalize_str_list(payload.get("include_users"), "include_users")
-            include_roles = _normalize_str_list(payload.get("include_roles"), "include_roles")
-            include_groups = _normalize_str_list(payload.get("include_groups"), "include_groups")
-
-            merge_with_env_filters = payload.get("merge_with_env_filters", True)
-            if not isinstance(merge_with_env_filters, bool):
-                raise HTTPException(status_code=400, detail="merge_with_env_filters must be a boolean")
-
             summary = self.runner.run_sync_once(
-                include_users=include_users,
-                include_roles=include_roles,
-                include_groups=include_groups,
-                merge_with_defaults=merge_with_env_filters,
+                include_users=payload.include_users_set(),
+                include_roles=payload.include_roles_set(),
+                include_groups=payload.include_groups_set(),
+                merge_with_defaults=payload.merge_with_env_filters,
             )
             summary["duration_seconds"] = round(time.time() - started, 3)
             return summary
@@ -74,7 +80,7 @@ def health() -> Dict[str, str]:
 
 
 @app.post("/sync")
-def trigger_sync(payload: Dict[str, Any]) -> Dict[str, object]:
+def trigger_sync(payload: SyncRequest) -> Dict[str, object]:
     return sync_api.trigger(payload)
 
 
