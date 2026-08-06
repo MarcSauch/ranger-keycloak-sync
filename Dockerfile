@@ -9,5 +9,8 @@ COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY sync.py ./
+COPY sync_logic.py ./
+COPY api.py ./
+COPY main.py ./
 
-CMD ["python", "sync.py"]
+CMD ["python", "main.py"]

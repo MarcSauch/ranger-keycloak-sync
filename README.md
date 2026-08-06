@@ -10,6 +10,7 @@ Sync Keycloak realm roles and user groups to Apache Ranger, and keep membership 
 - Creates missing Ranger roles with a configurable prefix.
 - Adds users to mapped Ranger groups.
 - Grants and optionally revokes Ranger role membership to match Keycloak.
+- Exposes a FastAPI endpoint to trigger sync on demand.
 - Runs once or on a recurring interval.
 
 ## Requirements
@@ -56,6 +57,9 @@ Common optional values:
 - `SYNC_INCLUDE_USERS` (comma-separated Keycloak usernames to sync)
 - `SYNC_INCLUDE_ROLES` (comma-separated Keycloak realm roles to sync)
 - `SYNC_INCLUDE_GROUPS` (comma-separated Keycloak groups to sync)
+- `SYNC_API_ENABLED` (default: `false`)
+- `SYNC_API_HOST` (default: `0.0.0.0`)
+- `SYNC_API_PORT` (default: `8000`)
 - `KEYCLOAK_ROLE_EXCLUDE` (comma-separated list)
 - `RANGER_ROLE_PREFIX` (default: `kc_`)
 - `LOG_LEVEL` (default: `INFO`)
@@ -81,6 +85,12 @@ Subset sync notes:
 - Set `SYNC_INCLUDE_GROUPS` to limit synced group memberships.
 - You can combine all three filters to sync only a precise scope.
 
+API trigger notes:
+
+- Set `SYNC_API_ENABLED=true` to start FastAPI instead of the interval worker loop.
+- `POST /sync` triggers one sync run.
+- You can pass additional per-request filter values and choose whether to merge them with env filters.
+
 ## Run Locally
 
 Install dependencies:
@@ -92,7 +102,32 @@ pip install -r requirements.txt
 Run the sync process:
 
 ```bash
-python sync.py
+python main.py
+```
+
+Run API mode:
+
+```bash
+SYNC_API_ENABLED=true python main.py
+```
+
+Trigger sync via API:
+
+```bash
+curl -X POST http://localhost:8000/sync \
+	-H "Content-Type: application/json" \
+	-d '{
+		"include_users": ["alice"],
+		"include_roles": ["analyst"],
+		"include_groups": ["/team/data"],
+		"merge_with_env_filters": true
+	}'
+```
+
+Health endpoint:
+
+```bash
+curl http://localhost:8000/health
 ```
 
 ## Run With Docker Compose
@@ -118,7 +153,10 @@ docker compose down
 
 ## Files
 
-- `sync.py`: Main sync worker.
+- `main.py`: Application entrypoint for worker or API mode.
+- `sync_logic.py`: Core Keycloak to Ranger sync logic.
+- `api.py`: FastAPI endpoints for on-demand sync.
+- `sync.py`: Backward-compatible wrapper to `main.py`.
 - `.env.example`: Example configuration values.
 - `Dockerfile`: Container image definition.
 - `docker-compose.yml`: Service startup definition.
