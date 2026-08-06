@@ -318,20 +318,41 @@ class RangerSync:
         return resp.json()
 
     def _update_user_groups(self, user_name: str, target_groups: Set[str]) -> None:
-        payload = {
-            "name": user_name,
-            "groupNameList": sorted(target_groups),
+        user_info = self._get_ranger_user_info(user_name)
+        sorted_groups = sorted(target_groups)
+
+        group_info_payload = {
+            "xuserInfo": {
+                "id": user_info.get("id"),
+                "name": user_name,
+                "groupNameList": sorted_groups,
+            },
+            "xgroupInfo": [{"name": group_name} for group_name in sorted_groups],
         }
-        update_urls = [
-            f"{self.base_url}/service/xusers/users/userinfo",
-            f"{self.base_url}/service/xusers/users/external",
+
+        # Ranger Swagger documents /xusers/users/userinfo as VXUserGroupInfo.
+        update_attempts = [
+            (
+                "post",
+                f"{self.base_url}/service/xusers/users/userinfo",
+                group_info_payload,
+            ),
+            (
+                "put",
+                f"{self.base_url}/service/xusers/users",
+                {
+                    **user_info,
+                    "name": user_name,
+                    "groupNameList": sorted_groups,
+                },
+            ),
         ]
 
         last_error: Exception | None = None
-        for update_url in update_urls:
+        for method, update_url, payload in update_attempts:
             try:
-                resp = self._session.post(update_url, json=payload, timeout=30)
-                if resp.status_code in (200, 201):
+                resp = self._session.request(method.upper(), update_url, json=payload, timeout=30)
+                if resp.status_code in (200, 201, 204):
                     return
                 if resp.status_code in (400, 404, 405):
                     continue
